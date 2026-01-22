@@ -8,251 +8,123 @@
 let
   inherit (lib) mkOption types;
 
-  cfg = config.xsession;
+  cfg = config.xresources;
+
+  formatLine =
+    n: v:
+    let
+      formatList =
+        x:
+        if lib.isList x then
+          throw "can not convert 2-dimensional lists to Xresources format"
+        else
+          formatValue x;
+
+      formatValue =
+        v:
+        if lib.isBool v then
+          (if v then "true" else "false")
+        else if lib.isList v then
+          lib.concatMapStringsSep ", " formatList v
+        else
+          toString v;
+    in
+    "${n}: ${formatValue v}";
+
+  xrdbMerge = "${pkgs.xorg.xrdb}/bin/xrdb -merge ${cfg.path}";
 
 in
 {
   meta.maintainers = [ lib.maintainers.rycee ];
 
   options = {
-    xsession = {
-      enable = lib.mkEnableOption "X Session";
+    xresources.properties = mkOption {
+      type =
+        with types;
+        let
+          prim = oneOf [
+            bool
+            int
+            float
+            str
+          ];
+          entry = either prim (listOf prim);
+        in
+        nullOr (attrsOf entry);
+      default = null;
+      example = lib.literalExpression ''
+        {
+          "Emacs*toolBar" = 0;
+          "XTerm*faceName" = "dejavu sans mono";
+          "XTerm*charClass" = [ "37:48" "45-47:48" "58:48" "64:48" "126:48" ];
+        }
+      '';
+      description = ''
+        X server resources that should be set.
+        Booleans are formatted as "true" or "false" respectively.
+        List elements are recursively formatted as a string and joined by commas.
+        All other values are directly formatted using builtins.toString.
+        Note, that 2-dimensional lists are not supported and specifying one will throw an exception.
+        If this and all other xresources options are
+        `null`, then this feature is disabled and no
+        {file}`~/.Xresources` link is produced.
+      '';
+    };
 
-      trayTarget = mkOption {
-        readOnly = true;
-        internal = true;
-        visible = false;
-        description = "Common tray.target for both xsession and wayland";
-        type = types.attrs;
-        default = {
-          Unit = {
-            Description = "Home Manager System Tray";
-            Requires = [ "graphical-session-pre.target" ];
-          };
-        };
-      };
+    xresources.extraConfig = mkOption {
+      type = types.lines;
+      default = "";
+      example = lib.literalExpression ''
+        builtins.readFile (
+            pkgs.fetchFromGitHub {
+                owner = "solarized";
+                repo = "xresources";
+                rev = "025ceddbddf55f2eb4ab40b05889148aab9699fc";
+                sha256 = "0lxv37gmh38y9d3l8nbnsm1mskcv10g3i83j0kac0a2qmypv1k9f";
+            } + "/Xresources.dark"
+        )
+      '';
+      description = ''
+        Additional X server resources contents.
+        If this and all other xresources options are
+        `null`, then this feature is disabled and no
+        {file}`~/.Xresources` link is produced.
+      '';
+    };
 
-      scriptPath = mkOption {
-        type = types.str;
-        default = ".xsession";
-        example = ".xsession-hm";
-        description = ''
-          Path, relative to {env}`HOME`, where Home Manager
-          should write the X session script.
-        '';
-      };
-
-      profilePath = mkOption {
-        type = types.str;
-        default = ".xprofile";
-        example = ".xprofile-hm";
-        description = ''
-          Path, relative to {env}`HOME`, where Home Manager
-          should write the X profile script.
-        '';
-      };
-
-      windowManager.command = mkOption {
-        type = types.str;
-        example = lib.literalExpression ''
-          let
-            xmonad = pkgs.xmonad-with-packages.override {
-              packages = self: [ self.xmonad-contrib self.taffybar ];
-            };
-          in
-            "''${xmonad}/bin/xmonad";
-        '';
-        default = ''test -n "$1" && eval "$@"'';
-        description = ''
-          Command to use to start the window manager.
-
-          The default value allows integration with NixOS' generated xserver configuration.
-
-          Extra actions and commands can be specified in {option}`xsession.initExtra`.
-        '';
-      };
-
-      preferStatusNotifierItems = mkOption {
-        type = types.bool;
-        default = false;
-        example = true;
-        description = ''
-          Whether tray applets should prefer using the Status Notifier
-          Items (SNI) protocol, commonly called App Indicators. Note,
-          not all tray applets or status bars support SNI.
-        '';
-      };
-
-      profileExtra = mkOption {
-        type = types.lines;
-        default = "";
-        description = "Extra shell commands to run before session start.";
-      };
-
-      initExtra = mkOption {
-        type = types.lines;
-        default = "";
-        description = "Extra shell commands to run during initialization.";
-      };
-
-      importedVariables = mkOption {
-        type = types.listOf (types.strMatching "[a-zA-Z_][a-zA-Z0-9_]*");
-        apply = lib.unique;
-        example = [ "GDK_PIXBUF_ICON_LOADER" ];
-        visible = false;
-        description = ''
-          Environment variables to import into the user systemd
-          session. The will be available for use by graphical
-          services.
-        '';
-      };
+    xresources.path = mkOption {
+      type = types.str;
+      default =
+        if config.home.preferXdgDirectories then
+          "${config.xdg.configHome}/X11/xresources"
+        else
+          "${config.home.homeDirectory}/.Xresources";
+      defaultText = lib.literalExpression ''
+        if config.home.preferXdgDirectories then
+          "''${config.xdg.configHome}/X11/xresources"
+        else
+          "''${config.home.homeDirectory}/.Xresources";
+      '';
+      description = "Path where Home Manager should link the {file}`.Xresources` file.";
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    assertions = [
-      (lib.hm.assertions.assertPlatform "xsession" pkgs lib.platforms.linux)
-    ];
-
-    xsession.importedVariables = [
-      "DBUS_SESSION_BUS_ADDRESS"
-      "DISPLAY"
-      "SSH_AUTH_SOCK"
-      "XAUTHORITY"
-      "XDG_DATA_DIRS"
-      "XDG_RUNTIME_DIR"
-      "XDG_SESSION_ID"
-    ];
-
-    systemd.user = {
-      services = lib.mkIf (config.home.keyboard != null) {
-        setxkbmap = {
-          Unit = {
-            Description = "Set up keyboard in X";
-            After = [ "graphical-session-pre.target" ];
-            PartOf = [ "graphical-session.target" ];
-          };
-
-          Install = {
-            WantedBy = [ "graphical-session.target" ];
-          };
-
-          Service = {
-            Type = "oneshot";
-            RemainAfterExit = true;
-            ExecStart =
-              with config.home.keyboard;
-              let
-                args =
-                  lib.optional (layout != null) "-layout '${layout}'"
-                  ++ lib.optional (variant != null) "-variant '${variant}'"
-                  ++ lib.optional (model != null) "-model '${model}'"
-                  ++ [ "-option ''" ]
-                  ++ map (v: "-option '${v}'") options;
-              in
-              "${pkgs.xorg.setxkbmap}/bin/setxkbmap ${toString args}";
-          };
-        };
-
-        xplugd = {
-          Unit = {
-            Description = "Rerun setxkbmap.service when I/O is changed";
-            After = [ "graphical-session-pre.target" ];
-            PartOf = [ "graphical-session.target" ];
-          };
-
-          Install = {
-            WantedBy = [ "graphical-session.target" ];
-          };
-
-          Service = {
-            Type = "forking";
-            Restart = "on-failure";
-            ExecStart =
-              let
-                script = pkgs.writeShellScript "xplugrc" ''
-                  case "$1,$3" in
-                    keyboard,connected)
-                    systemctl --user restart setxkbmap.service
-                    ;;
-                  esac
-                '';
-              in
-              "${pkgs.xplugd}/bin/xplugd ${script}";
-          };
-        };
-      };
-
-      targets = {
-        # A basic graphical session target for Home Manager.
-        hm-graphical-session = {
-          Unit = {
-            Description = "Home Manager X session";
-            Requires =
-              let
-                requires = lib.optional (config.xdg.autostart.enable) "xdg-desktop-autostart.target" ++ [
-                  "graphical-session-pre.target"
-                ];
-              in
-              requires;
-            BindsTo = [
-              "graphical-session.target"
-              "tray.target"
-            ];
-          };
-        };
-
-        tray = cfg.trayTarget;
-      };
-    };
-
-    home.file.${cfg.profilePath}.text = ''
-      . "${config.home.profileDirectory}/etc/profile.d/hm-session-vars.sh"
-
-      if [ -e "$HOME/.profile" ]; then
-        . "$HOME/.profile"
-      fi
-
-      # If there are any running services from a previous session.
-      # Need to run this in xprofile because the NixOS xsession
-      # script starts up graphical-session.target.
-      systemctl --user stop graphical-session.target graphical-session-pre.target
-
-      ${lib.optionalString (cfg.importedVariables != [ ]) (
-        "systemctl --user import-environment " + lib.escapeShellArgs cfg.importedVariables
-      )}
-
-      ${cfg.profileExtra}
-
-      export HM_XPROFILE_SOURCED=1
-    '';
-
-    home.file.${cfg.scriptPath} = {
-      executable = true;
-      text = ''
-        if [ -z "$HM_XPROFILE_SOURCED" ]; then
-          . "${config.home.homeDirectory}/${cfg.profilePath}"
+  config = lib.mkIf ((cfg.properties != null && cfg.properties != { }) || cfg.extraConfig != "") {
+    home.file.${cfg.path} = {
+      text =
+        lib.concatStringsSep "\n" (
+          [ ]
+          ++ lib.optional (cfg.extraConfig != "") cfg.extraConfig
+          ++ lib.optionals (cfg.properties != null) (lib.mapAttrsToList formatLine cfg.properties)
+        )
+        + "\n";
+      onChange = ''
+        if [[ -v DISPLAY ]]; then
+          ${xrdbMerge}
         fi
-        unset HM_XPROFILE_SOURCED
-
-        systemctl --user start hm-graphical-session.target
-
-        ${cfg.initExtra}
-
-        ${cfg.windowManager.command}
-
-        systemctl --user stop graphical-session.target
-        systemctl --user stop graphical-session-pre.target
-
-        # Wait until the units actually stop.
-        while [ -n "$(systemctl --user --no-legend --state=deactivating list-units)" ]; do
-          sleep 0.5
-        done
-
-        ${lib.optionalString (cfg.importedVariables != [ ]) (
-          "systemctl --user unset-environment " + lib.escapeShellArgs cfg.importedVariables
-        )}
       '';
     };
+
+    xsession.profileExtra = xrdbMerge;
   };
 }
